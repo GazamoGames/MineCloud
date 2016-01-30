@@ -286,6 +286,7 @@ public class MineCloudDaemon {
 
             for (File f : appContainer.listFiles(File::isDirectory)) {
                 if (!names.contains(f.getName())) {
+                    MineCloud.logger().info("Dead server's folder found: " + f.getName());
                     Deployer.killServer(f.getName());
                 }
             }
@@ -295,6 +296,7 @@ public class MineCloudDaemon {
                 long timeOut = s.type().timeOut() * 1000L; // to ms
 
                 if ((System.currentTimeMillis() - s.startTime()) >= timeOut) {
+                    MineCloud.logger().info("Timeout called for " + s.entityId());
                     Deployer.killServer(s.name());
                     repository.delete(s);
                     names.remove(s.name());
