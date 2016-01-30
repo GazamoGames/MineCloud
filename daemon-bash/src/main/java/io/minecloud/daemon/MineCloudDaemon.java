@@ -272,25 +272,6 @@ public class MineCloudDaemon {
                 }
             }
 
-            File appContainer = new File("/var/minecloud");
-
-            names.add("bungee"); // don't remove bungee servers
-
-            if (!appContainer.isDirectory()) {
-                appContainer.delete();
-            }
-
-            if (!appContainer.exists()) {
-                appContainer.mkdirs();
-            }
-
-            for (File f : appContainer.listFiles(File::isDirectory)) {
-                if (!names.contains(f.getName())) {
-                    MineCloud.logger().info("Dead server's folder found: " + f.getName());
-                    Deployer.killServer(f.getName());
-                }
-            }
-
             /* Startup timeout */
             nodeServers.stream().filter((s) -> s.ramUsage() == -1).forEach((s) -> {
                 long timeOut = s.type().timeOut() * 1000L; // to ms
