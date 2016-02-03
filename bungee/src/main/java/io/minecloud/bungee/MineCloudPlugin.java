@@ -15,8 +15,16 @@
  */
 package io.minecloud.bungee;
 
+import com.google.common.base.Throwables;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 import com.google.common.io.Files;
+import com.google.common.net.InetAddresses;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.mongodb.BasicDBObject;
+import com.mongodb.DBObject;
 import io.minecloud.Cached;
 import io.minecloud.MineCloud;
 import io.minecloud.MineCloudException;
@@ -43,6 +51,7 @@ import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -54,6 +63,30 @@ public class MineCloudPlugin extends Plugin {
     MongoDatabase mongo;
     RedisDatabase redis;
 
+    private final LoadingCache<String, ServerType> serverTypeCache;
+    private final LoadingCache<String, Server> serverCache;
+
+    public MineCloudPlugin() {
+        this.serverTypeCache = CacheBuilder.newBuilder().expireAfterWrite(30L, TimeUnit.SECONDS).build(new CacheLoader<String, ServerType>() {
+            @Override
+            public ServerType load(String key) throws Exception {
+                if (MineCloud.instance().mongo() == null) {
+                    return null;
+                }
+                return MineCloud.instance().mongo().repositoryBy(ServerType.class).findOne("_id", key);
+            }
+        });
+        this.serverCache = CacheBuilder.newBuilder().expireAfterWrite(20L, TimeUnit.SECONDS).build(new CacheLoader<String, Server>() {
+            @Override
+            public Server load(String key) throws Exception {
+                if (MineCloud.instance().mongo() == null) {
+                    return null;
+                }
+                return MineCloud.instance().mongo().repositoryBy(Server.class).findOne("_id", key);
+            }
+        });
+    }
+
     @Override
     public void onEnable() {
         MineCloud.environmentSetup();
@@ -62,113 +95,136 @@ public class MineCloudPlugin extends Plugin {
         redis = MineCloud.instance().redis();
 
         try {
-            Files.write(ManagementFactory.getRuntimeMXBean().getName().split("@")[0].getBytes(Charset.defaultCharset()),
-                    new File("app.pid"));
+            Files.write(ManagementFactory.getRuntimeMXBean().getName().split("@")[0].getBytes(Charset.defaultCharset()), new File("app.pid"));
         } catch (IOException ex) {
             ex.printStackTrace();
         }
 
-        redis.addChannel(SimpleRedisChannel.create("server-start-notif", redis)
-                .addCallback((message) ->
-                    getProxy().getScheduler().schedule(this, () -> {
-                        if (message.type() != MessageType.BINARY) {
+        getProxy().getScheduler().runAsync(this, () -> {
+            redis.addChannel(SimpleRedisChannel.create("server-start-notif", redis).addCallback(msg -> {
+                getProxy().getScheduler().runAsync(MineCloudPlugin.this, () -> {
+                    if (msg.type() != MessageType.BINARY) {
+                        return;
+                    }
+
+                    try (MessageInputStream stream = msg.contents()) {
+                        String serverId = stream.readString();
+                        Server server = serverCache.getUnchecked(serverId);
+                        if (server == null) {
+                            getLogger().log(Level.WARNING, "Could not find server with the ID {0}", new Object[] {
+                                    serverId
+                            });
                             return;
                         }
-
-                        try {
-                            MessageInputStream stream = message.contents();
-                            Server server = mongo.repositoryBy(Server.class).findFirst(stream.readString());
-
-                            addServer(server);
-                        } catch (IOException ignored) {
-                        }
-                    }, 1, TimeUnit.SECONDS)));
-
-        redis.addChannel(SimpleRedisChannel.create("server-shutdown-notif", redis)
-                .addCallback((message) -> {
-                    if (message.type() != MessageType.BINARY) {
-                        return;
+                        addIfNotExist(server);
+                    } catch (IOException e) {
+                        getLogger().log(Level.SEVERE, "PANICPANICPANICPANIC");
                     }
+                });
+            }));
+        });
 
-                    MessageInputStream stream = message.contents();
+        getProxy().getScheduler().runAsync(this, () -> {
+            redis.addChannel(SimpleRedisChannel.create("server-shutdown-notif", redis).addCallback(msg -> {
+                if (msg.type() != MessageType.BINARY) {
+                    return;
+                }
 
-                    removeServer(stream.readString());
-                }));
-
-        redis.addChannel(SimpleRedisChannel.create("teleport", redis)
-                .addCallback((message) -> {
-                    if (message.type() != MessageType.BINARY) {
-                        return;
+                try (MessageInputStream stream = msg.contents()) {
+                    String serverId = stream.readString();
+                    ServerInfo info = getProxy().getServers().remove(serverId);
+                    if (info != null) {
+                        getLogger().log(Level.INFO, "Stopped tracking {0}", new Object[] {
+                                serverId
+                        });
                     }
+                }
+            }));
+        });
 
-                    MessageInputStream stream = message.contents();
-                    ProxiedPlayer player = getProxy().getPlayer(stream.readString());
+        getProxy().getScheduler().runAsync(this, () -> {
+            redis.addChannel(SimpleRedisChannel.create("teleport", redis).addCallback(msg -> {
+                if (msg.type() != MessageType.BINARY) {
+                    return;
+                }
+
+                try (MessageInputStream stream = msg.contents()) {
+                    String playerName = stream.readString();
+                    String serverName = stream.readString();
+
+                    ProxiedPlayer player = getProxy().getPlayer(playerName);
+                    ServerInfo info = getProxy().getServerInfo(serverName);
 
                     if (player == null) {
                         return;
                     }
-
-                    String name = stream.readString();
-                    ServerInfo info = getProxy().getServerInfo(name);
 
                     if (info == null) {
-                        ServerRepository repository = mongo.repositoryBy(Server.class);
-                        Server server = repository.findOne("_id", name);
-
+                        Server server = serverCache.getUnchecked(serverName);
                         if (server != null) {
-                            addServer(server);
-                            info = getProxy().getServerInfo(name);
+                            info = addIfNotExist(server);
                         }
                     }
 
-                    player.connect(info);
-                }));
+                    player.connect(info, (result, error) -> {
+                        if (error != null) {
+                            getLogger().log(Level.SEVERE, "Failed to move {0} to {1}: {2}", new Object[] {
+                                    playerName, serverName, Throwables.getStackTraceAsString(error)
+                            });
+                        }
+                    });
+                }
+            }));
+        });
 
-        redis.addChannel(SimpleRedisChannel.create("teleport-type", redis)
-                .addCallback((message) -> {
-                    if (message.type() != MessageType.BINARY) {
-                        return;
-                    }
+        getProxy().getScheduler().runAsync(this, () -> {
+            redis.addChannel(SimpleRedisChannel.create("teleport-type", redis).addCallback(msg -> {
+                if (msg.type() != MessageType.BINARY) {
+                    return;
+                }
 
-                    MessageInputStream stream = message.contents();
-                    ProxiedPlayer player = getProxy().getPlayer(stream.readString());
+                try (MessageInputStream stream = msg.contents()) {
+                    String playerName = stream.readString();
+                    String typeName = stream.readString();
 
+                    ProxiedPlayer player = getProxy().getPlayer(playerName);
                     if (player == null) {
                         return;
                     }
 
-                    ServerType type = mongo.repositoryBy(ServerType.class)
-                            .findFirst(stream.readString());
-
-                    if (type == null) {
-                        getLogger().log(Level.SEVERE, "Received teleport message with invalid server type");
+                    ServerType type = serverTypeCache.getUnchecked(typeName);
+                    if (type == null ) {
+                        getLogger().log(Level.WARNING, "Received teleport message with an invalid server type");
                         return;
                     }
 
-                    ServerRepository repository = mongo.repositoryBy(Server.class);
-                    List<Server> servers = repository.find(repository.createQuery()
+                    List<Server> servers = mongo.repositoryBy(Server.class).createQuery()
                             .field("network").equal(bungee().network())
-                            .field("type").equal(type)
+                            .field("ramUsage").notEqual(-1)
                             .field("port").notEqual(-1)
-                            .field("ramUsage").notEqual(-1))
+                            .field("type").equal(type)
                             .asList();
 
-                    Collections.sort(servers, (a, b) -> a.onlinePlayers().size() - b.onlinePlayers().size());
-
-                    Server server = servers.get(0);
-                    ServerInfo info = getProxy().getServerInfo(server.name());
-
-                    if (info == null) {
-                        getLogger().warning("Cannot find " + server.name() + " in ServerInfo store, adding.");
-                        addServer(server);
-                        info = getProxy().getServerInfo(server.name());
+                    if (servers.size() > 1) {
+                        Collections.sort(servers, (a, b) -> a.onlinePlayers().size() - b.onlinePlayers().size());
                     }
 
-                    player.connect(info);
-                }));
+                    Server server = servers.get(0);
+                    ServerInfo info = addIfNotExist(server);
+                    player.connect(info, (result, error) -> {
+                        if (error != null) {
+                            getLogger().log(Level.SEVERE, "Failed to move {0} to {1}: {2}", new Object[] {
+                                    playerName, server.name(), Throwables.getStackTraceAsString(error)
+                            });
+                        }
+                    });
+                }
+            }));
+        });
 
+        DBObject scope = new BasicDBObject("_id", System.getenv("bungee_id"));
         getProxy().getScheduler().schedule(this, () -> getProxy().getScheduler().runAsync(this, () -> {
-            if (mongo.db().getCollection("bungees").count(new BasicDBObject("_id", System.getenv("bungee_id"))) != 0) {
+            if (mongo.db().getCollection("bungees").count(scope) != 0) {
                 return;
             }
 
@@ -251,6 +307,9 @@ public class MineCloudPlugin extends Plugin {
 
     @Override
     public void onDisable() {
+        serverTypeCache.invalidateAll();
+        serverCache.invalidateAll();
+
         mongo.repositoryBy(Bungee.class).deleteById(System.getenv("bungee_id"));
     }
 
@@ -287,18 +346,21 @@ public class MineCloudPlugin extends Plugin {
         }
     }
 
+    @Deprecated
     public void addServer(Server server) {
-        ServerInfo info = getProxy().constructServerInfo(server.name(),
-                new InetSocketAddress(server.node().privateIp(), server.port()),
-                "", false);
-
-        getProxy().getServers().put(server.name(), info);
-        getLogger().info("Added " + server.name() + " to server list, " + server.node().privateIp() +
-                ":" + server.port());
+        addIfNotExist(server);
     }
 
-    public void removeServer(String server) {
-        getProxy().getServers().remove(server);
+    public ServerInfo addIfNotExist(Server server) {
+        ServerInfo info = getProxy().getServerInfo(server.name());
+        if (info == null) {
+            info = getProxy().constructServerInfo(server.name(), new InetSocketAddress(server.node().privateIp(), server.port()), "", false);
+            getProxy().getServers().put(info.getName(), info);
+            getLogger().log(Level.INFO, "Began tracking {0} - {1}:{2}", new Object[] {
+                    info.getName(), InetAddresses.toAddrString(info.getAddress().getAddress()), String.valueOf(info.getAddress().getPort())
+            });
+        }
+        return info;
     }
 
     public Bungee bungee() {
