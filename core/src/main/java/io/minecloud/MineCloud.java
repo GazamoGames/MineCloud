@@ -18,6 +18,7 @@ package io.minecloud;
 import io.minecloud.db.Credentials;
 import io.minecloud.db.mongo.MongoDatabase;
 import io.minecloud.db.redis.RedisDatabase;
+import io.minecloud.db.redis.pubsub.RedisChannel;
 import io.minecloud.models.bungee.Bungee;
 import io.minecloud.models.bungee.BungeeRepository;
 import io.minecloud.models.bungee.type.BungeeType;
@@ -45,6 +46,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.Properties;
 import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
 import java.util.logging.Logger;
 
 public final class MineCloud {
@@ -75,6 +77,13 @@ public final class MineCloud {
 
         instance().initiateMongo(mongoCredentials);
         instance().initiateRedis(redisCredentials);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            ExecutorService service = RedisChannel.getExecutor();
+            if (service != null) {
+                service.shutdownNow();
+            }
+        }, "Minecloud Cleanup Thread"));
     }
 
     private static String getenv(String name) {

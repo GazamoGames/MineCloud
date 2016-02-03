@@ -40,10 +40,9 @@ public final class ChannelPubSub extends BinaryJedisPubSub {
 
     @Override
     public void onMessage(byte[] c, byte[] message) {
-        InputStream stream = new ByteArrayInputStream(message);
         MessageType type = MessageType.BINARY;
 
-        try {
+        try (InputStream stream = new ByteArrayInputStream(message)){
             type = MessageType.values()[stream.read()];
             byte[] data = new byte[message.length - 1];
 

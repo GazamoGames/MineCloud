@@ -20,8 +20,34 @@ import io.minecloud.db.redis.msg.Message;
 import redis.clients.jedis.Jedis;
 
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public abstract class RedisChannel {
+    private static ExecutorService executor = Executors.newFixedThreadPool(Integer.getInteger("minecloud.redis-executor-threads", 8), new ThreadFactory() {
+        private final AtomicInteger counter = new AtomicInteger();
+
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, String.format("MineCloud - Redis Thread #%d", counter.incrementAndGet()));
+        }
+    });
+
+    public static ExecutorService getExecutor() {
+        return executor;
+    }
+
+    public static void setExecutor(ExecutorService executor) {
+        if (executor == null) {
+            throw new IllegalArgumentException("executor must not be null");
+        }
+        RedisChannel.executor = executor;
+    }
+
     protected final RedisDatabase database;
     protected final String channel;
 
@@ -29,11 +55,11 @@ public abstract class RedisChannel {
         this.database = database;
         this.channel = channel;
 
-        new Thread(() -> {
+        executor.submit(() -> {
             try (Jedis resource = database.grabResource()) {
-                resource.subscribe(ChannelPubSub.create(this), channel.getBytes(Charset.forName("UTF-8")));
+                resource.subscribe(ChannelPubSub.create(this), channel.getBytes(StandardCharsets.UTF_8));
             }
-        }, "MineCloud - Channel '" + channel + " Thread").start();
+        });
     }
 
     public String channel() {
