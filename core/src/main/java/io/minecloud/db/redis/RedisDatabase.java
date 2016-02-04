@@ -62,9 +62,9 @@ public final class RedisDatabase implements Database {
         }
 
         if (credentials.password() == null || credentials.password().length < 1) {
-            pool = new JedisPool(config, host, port, 1000, new String(credentials.password()));
-        } else {
             pool = new JedisPool(config, host, port, 1000);
+        } else {
+            pool = new JedisPool(config, host, port, 1000, new String(credentials.password()));
         }
     }
 
@@ -94,6 +94,7 @@ public final class RedisDatabase implements Database {
                 MineCloud.logger().log(Level.SEVERE, "Redis connection had died, reconnecting. {0}", new Object[] {
                         e
                 });
+                e.printStackTrace();
                 success = false;
                 setup();
             }
