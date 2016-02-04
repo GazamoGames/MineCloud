@@ -26,9 +26,11 @@ import redis.clients.jedis.JedisPoolConfig;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 public final class RedisDatabase implements Database {
-    private final Map<String, RedisChannel> channels = new HashMap<>();
+    private final Map<String, RedisChannel> channels = new ConcurrentHashMap<>();
     private final Credentials credentials;
     private JedisPool pool;
 
@@ -45,10 +47,8 @@ public final class RedisDatabase implements Database {
         JedisPoolConfig config = new JedisPoolConfig();
 
         config.setMaxTotal(20);
-        config.setMinIdle(5);
         config.setMaxIdle(10);
-        config.setMaxWaitMillis(200L);
-        config.setBlockWhenExhausted(false);
+        config.setMinIdle(3);
 
         String host = credentials.hosts()[0];
         int port = 6379;
@@ -61,8 +61,11 @@ public final class RedisDatabase implements Database {
             }
         }
 
-        pool = credentials.password() != null && credentials.password().length > 0 ? new JedisPool(config, host, port, 1000, new String(credentials.password())) :
-                new JedisPool(config, host, port, 1000);
+        if (credentials.password() == null || credentials.password().length < 1) {
+            pool = new JedisPool(config, host, port, 1000, new String(credentials.password()));
+        } else {
+            pool = new JedisPool(config, host, port, 1000);
+        }
     }
 
     public void addChannel(RedisChannel channel) {
@@ -70,11 +73,7 @@ public final class RedisDatabase implements Database {
     }
 
     public RedisChannel channelBy(String name) {
-        if (!channels.containsKey(name)) {
-            addChannel(SimpleRedisChannel.create(name, this));
-        }
-
-        return channels.get(name);
+        return channels.computeIfAbsent(name, key -> SimpleRedisChannel.create(key, this));
     }
 
     public Jedis grabResource() {
@@ -86,15 +85,17 @@ public final class RedisDatabase implements Database {
     }
 
     public boolean connected() {
-        boolean connection;
-        try (Jedis jedis = grabResource()) {
-            return true;
-        } catch (JedisConnectionException e) {
-            MineCloud.logger().warning("Redis connection had died, reconnecting.");
-            connection = false;
-            this.setup(); //This should work, right? 
-            // No, it returns the old resource to the new pool
+        boolean success = false;
+        for (int i = 0; i < 3 && !success; i++) {
+            try (Jedis jedis = pool.getResource()) {
+                jedis.ping();
+                success = true;
+            } catch (JedisConnectionException e) {
+                MineCloud.logger().log(Level.SEVERE, "Redis connection had died, reconnecting. {0}");
+                success = false;
+                setup();
+            }
         }
-        return connection;
+        return success;
     }
 }
