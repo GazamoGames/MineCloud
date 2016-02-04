@@ -91,7 +91,9 @@ public final class RedisDatabase implements Database {
                 jedis.ping();
                 success = true;
             } catch (JedisConnectionException e) {
-                MineCloud.logger().log(Level.SEVERE, "Redis connection had died, reconnecting. {0}");
+                MineCloud.logger().log(Level.SEVERE, "Redis connection had died, reconnecting. {0}", new Object[] {
+                        e
+                });
                 success = false;
                 setup();
             }
